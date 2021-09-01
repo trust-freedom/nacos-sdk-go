@@ -27,6 +27,8 @@ import (
 	"github.com/nacos-group/nacos-sdk-go/common/http_agent"
 )
 
+// NacosClient包含Nacos客户端，服务端的配置，http代理
+// 实现INacosClient接口
 type NacosClient struct {
 	clientConfigValid  bool
 	serverConfigsValid bool
@@ -49,10 +51,12 @@ func (client *NacosClient) SetClientConfig(config constant.ClientConfig) (err er
 		config.UpdateThreadNum = 20
 	}
 
+	// 默认RotateTime=24h
 	if len(config.RotateTime) == 0 {
 		config.RotateTime = "24h"
 	}
 
+	// 默认info级别
 	if len(config.LogLevel) == 0 {
 		config.LogLevel = "info"
 	}

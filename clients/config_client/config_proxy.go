@@ -167,6 +167,7 @@ func (cp *ConfigProxy) ListenConfig(params map[string]string, isInitializing boo
 		"Content-Type":         "application/x-www-form-urlencoded;charset=utf-8",
 		"Long-Pulling-Timeout": strconv.FormatUint(listenInterval, 10),
 	}
+	// told server do not hang me up if new initializing cacheData added in
 	if isInitializing {
 		headers["Long-Pulling-Timeout-No-Hangup"] = "true"
 	}

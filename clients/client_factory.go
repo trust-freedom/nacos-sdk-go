@@ -81,7 +81,10 @@ func getConfigParam(properties map[string]interface{}) (param vo.NacosClientPara
 }
 
 func setConfig(param vo.NacosClientParam) (iClient nacos_client.INacosClient, err error) {
+	// 创建NacosClient
 	client := &nacos_client.NacosClient{}
+
+	// 设置NacosClient ClientConfig
 	if param.ClientConfig == nil {
 		// default clientConfig
 		client.SetClientConfig(constant.ClientConfig{})
@@ -89,6 +92,9 @@ func setConfig(param vo.NacosClientParam) (iClient nacos_client.INacosClient, er
 		client.SetClientConfig(*param.ClientConfig)
 	}
 
+	// 设置NacosClient ServerConfigs
+	// 如果长度为0，但clientConfig包含Endpoint，可用此端点获取serverList
+	//则尝试从ClientConfig获取Endpoint作为Nacos server addresses
 	if len(param.ServerConfigs) == 0 {
 		clientConfig, _ := client.GetClientConfig()
 		if len(clientConfig.Endpoint) <= 0 {

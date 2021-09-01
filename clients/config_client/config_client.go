@@ -38,6 +38,8 @@ import (
 	"github.com/nacos-group/nacos-sdk-go/vo"
 )
 
+// ConfigClient包含NacosClient，还有些配置中心相关的属性，如本地缓存相关，真正的配置中心操作是交给ConfigProxy
+// 实现IConfigClient接口
 type ConfigClient struct {
 	nacos_client.INacosClient
 	kmsClient        *kms.Client
@@ -45,9 +47,10 @@ type ConfigClient struct {
 	mutex            sync.Mutex
 	configProxy      ConfigProxy
 	configCacheDir   string
-	currentTaskCount int
-	cacheMap         cache.ConcurrentMap
-	schedulerMap     cache.ConcurrentMap
+	currentTaskCount int  // 当前长轮训任务数量，每3000个监听一个任务
+	cacheMap         cache.ConcurrentMap // 存放监听相关的缓存，key为 dataId + "@@" + group + "@@" + namespaceId
+	                                     // listenerSize = cacheMap.Count
+	schedulerMap     cache.ConcurrentMap // 存放定时执行的长轮训任务，key为taskId，value为boolean类型，代表当前任务是否继续执行
 }
 
 const (
@@ -77,7 +80,9 @@ func NewConfigClient(nc nacos_client.INacosClient) (*ConfigClient, error) {
 		cacheMap:     cache.NewConcurrentMap(),
 		schedulerMap: cache.NewConcurrentMap(),
 	}
+	// schedulerMap放入root任务，value=true表示执行
 	config.schedulerMap.Set("root", true)
+	// 开启root任务，执行func为config.listenConfigExecutor()
 	go config.delayScheduler(time.NewTimer(1*time.Millisecond), 10*time.Millisecond, "root", config.listenConfigExecutor())
 
 	config.INacosClient = nc
@@ -134,6 +139,7 @@ func (client *ConfigClient) sync() (clientConfig constant.ClientConfig,
 	return
 }
 
+// 获取指定group、dataId的配置信息
 func (client *ConfigClient) GetConfig(param vo.ConfigParam) (content string, err error) {
 	content, err = client.getConfigInner(param)
 
@@ -215,6 +221,7 @@ func (client *ConfigClient) getConfigInner(param vo.ConfigParam) (content string
 	return content, nil
 }
 
+// 发布配置
 func (client *ConfigClient) PublishConfig(param vo.ConfigParam) (published bool,
 	err error) {
 	if len(param.DataId) <= 0 {
@@ -281,6 +288,8 @@ func (client *ConfigClient) remakeCacheDataTaskId(remakeId int) {
 	}
 }
 
+// 监听配置
+// 此方法是向cacheMap中放入缓存数据，待定时任务listenConfigExecutor()从中获取后订阅配置信息的变化
 func (client *ConfigClient) ListenConfig(param vo.ConfigParam) (err error) {
 	if len(param.DataId) <= 0 {
 		err = errors.New("[client.ListenConfig] DataId can not be empty")
@@ -306,18 +315,22 @@ func (client *ConfigClient) ListenConfig(param vo.ConfigParam) (err error) {
 			content string
 			md5Str  string
 		)
+		// 从本地文件缓存中获取配置信息
 		content, fileErr := cache.ReadConfigFromFile(key, client.configCacheDir)
 		if fileErr != nil {
 			logger.Errorf("[cache.ReadConfigFromFile] error: %+v", fileErr)
 		}
+		// 若本地文件缓存中有数据，作为数据缓存的初始值，并生成其md5值
 		if len(content) > 0 {
 			md5Str = util.Md5(content)
 		}
+		// 构建监听数据变化的Listener
 		listener := &cacheDataListener{
-			listener: param.OnChange,
-			lastMd5:  md5Str,
+			listener: param.OnChange, // OnChange func
+			lastMd5:  md5Str,  // 配置md5
 		}
 
+		// 配置缓存数据
 		cData = cacheData{
 			isInitializing:    true,
 			dataId:            param.DataId,
@@ -326,45 +339,54 @@ func (client *ConfigClient) ListenConfig(param vo.ConfigParam) (err error) {
 			content:           content,
 			md5:               md5Str,
 			cacheDataListener: listener,
-			taskId:            client.cacheMap.Count() / perTaskConfigSize,
+			taskId:            client.cacheMap.Count() / perTaskConfigSize, // 当前监听所在任务Id，每3000个监控可在同一个任务
 		}
 	}
+	// 向cacheMap放入数据
+	// 如果cacheKey是首次被Listen，那么cData中的content、md5Str都是空串
 	client.cacheMap.Set(key, cData)
 	return
 }
 
-//Delay Scheduler
+//Delay Scheduler 延迟调度器
 //initialDelay the time to delay first execution
 //delay the delay between the termination of one execution and the commencement of the next
 func (client *ConfigClient) delayScheduler(t *time.Timer, delay time.Duration, taskId string, execute func() error) {
 	for {
 		if v, ok := client.schedulerMap.Get(taskId); ok {
+			// schedulerMap的key=taskId，value=boolean 判断任务是否继续执行
 			if !v.(bool) {
 				return
 			}
 		}
-		<-t.C
-		d := delay
+		<-t.C // initialDelay 初始延迟
+		d := delay // delay，默认10ms
 		if err := execute(); err != nil {
-			d = executorErrDelay
+			d = executorErrDelay // 发生错误，延迟5s下次执行
 		}
 		t.Reset(d)
 	}
 }
 
 //Listen for the configuration executor
+//root任务执行的func，用于通过cacheMap.Count()大小的判断，增加/减少长轮训任务的数量
 func (client *ConfigClient) listenConfigExecutor() func() error {
 	return func() error {
 		listenerSize := client.cacheMap.Count()
+		// 当前做Listener的任务数，每3000个监听可以共享一个task
+		// math.Ceil向上进一
 		taskCount := int(math.Ceil(float64(listenerSize) / float64(perTaskConfigSize)))
 
+		// 如果taskCount已经超过configClient当前执行的任务数
+		// 向schedulerMap中新增一条taskId:true
+		// 并为任务开启delayScheduler延迟调度
 		if taskCount > client.currentTaskCount {
 			for i := client.currentTaskCount; i < taskCount; i++ {
 				client.schedulerMap.Set(strconv.Itoa(i), true)
 				go client.delayScheduler(time.NewTimer(1*time.Millisecond), 10*time.Millisecond, strconv.Itoa(i), client.longPulling(i))
 			}
 			client.currentTaskCount = taskCount
-		} else if taskCount < client.currentTaskCount {
+		} else if taskCount < client.currentTaskCount { // 减少任务数量，schedulerMap的value置为false
 			for i := taskCount; i < client.currentTaskCount; i++ {
 				if _, ok := client.schedulerMap.Get(strconv.Itoa(i)); ok {
 					client.schedulerMap.Set(strconv.Itoa(i), false)
@@ -376,15 +398,19 @@ func (client *ConfigClient) listenConfigExecutor() func() error {
 	}
 }
 
-//Long polling listening configuration
+// Long polling listening configuration
+// 长轮训任务，默认每个任务可监听3000个cacheKey，长轮训30s超时
+// 返回后，根据配置是否有变更，判断是否调用Listener
 func (client *ConfigClient) longPulling(taskId int) func() error {
 	return func() error {
-		var listeningConfigs string
+		var listeningConfigs string  // 所有监听的配置
 		initializationList := make([]cacheData, 0)
 		for _, key := range client.cacheMap.Keys() {
 			if value, ok := client.cacheMap.Get(key); ok {
 				cData := value.(cacheData)
+				// 监听数据被分配的taskId等于当前长轮训任务的taskId
 				if cData.taskId == taskId {
+					// 是否为新添加的cacheData监听数据
 					if cData.isInitializing {
 						initializationList = append(initializationList, cData)
 					}
@@ -398,6 +424,7 @@ func (client *ConfigClient) longPulling(taskId int) func() error {
 				}
 			}
 		}
+		// listeningConfigs是所有监听配置拼起来的字符串
 		if len(listeningConfigs) > 0 {
 			clientConfig, err := client.GetClientConfig()
 			if err != nil {
@@ -409,6 +436,7 @@ func (client *ConfigClient) longPulling(taskId int) func() error {
 			params[constant.KEY_LISTEN_CONFIGS] = listeningConfigs
 
 			var changed string
+			// len(initializationList) > 0, server端应该不会hang住请求，可能是返回当前最新的版本号
 			changedTmp, err := client.configProxy.ListenConfig(params, len(initializationList) > 0, clientConfig.NamespaceId, clientConfig.AccessKey, clientConfig.SecretKey)
 			if err == nil {
 				changed = changedTmp
@@ -420,13 +448,17 @@ func (client *ConfigClient) longPulling(taskId int) func() error {
 				}
 				return err
 			}
+
+			// 将initializationList中所有cacheData的isInitializing置为false
+			// 即将原本新添加的cacheData数据置为非初始化状态
 			for _, v := range initializationList {
 				v.isInitializing = false
 				client.cacheMap.Set(util.GetConfigCacheKey(v.dataId, v.group, v.tenant), v)
 			}
+
 			if len(strings.ToLower(strings.Trim(changed, " "))) == 0 {
 				logger.Info("[client.ListenConfig] no change")
-			} else {
+			} else { // 配置有变更，调用Listener
 				logger.Info("[client.ListenConfig] config changed:" + changed)
 				client.callListener(changed, clientConfig.NamespaceId)
 			}
@@ -436,14 +468,22 @@ func (client *ConfigClient) longPulling(taskId int) func() error {
 
 }
 
-//Execute the Listener callback func()
+// Execute the Listener callback func()
+// 调用配置监听器
 func (client *ConfigClient) callListener(changed, tenant string) {
 	changedConfigs := strings.Split(changed, "%01")
+	// 循环遍历所有配置发生变更的
+	// 1、真正的获取最新的配置数据
+	// 2、调用OnChange
+	// 3、更新cache
 	for _, config := range changedConfigs {
 		attrs := strings.Split(config, "%02")
 		if len(attrs) >= 2 {
+			// 获取发生配置变更的cacheData
+			// dataId=attrs[0], groupId=attrs[1]
 			if value, ok := client.cacheMap.Get(util.GetConfigCacheKey(attrs[0], attrs[1], tenant)); ok {
 				cData := value.(cacheData)
+				// 真正的获取最新的配置数据
 				content, err := client.getConfigInner(vo.ConfigParam{
 					DataId: cData.dataId,
 					Group:  cData.group,
@@ -454,9 +494,12 @@ func (client *ConfigClient) callListener(changed, tenant string) {
 				}
 				cData.content = content
 				cData.md5 = util.Md5(content)
+				// 配置的md5值发生变化
 				if cData.md5 != cData.cacheDataListener.lastMd5 {
+					// 调用OnChange
 					go cData.cacheDataListener.listener(tenant, attrs[1], attrs[0], cData.content)
 					cData.cacheDataListener.lastMd5 = cData.md5
+					// 更新cache
 					client.cacheMap.Set(util.GetConfigCacheKey(cData.dataId, cData.group, tenant), cData)
 				}
 			}

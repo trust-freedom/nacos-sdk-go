@@ -45,8 +45,8 @@ func main() {
 		NamespaceId:         "e525eafa-f7d7-4029-83d9-008937f9d468", //namespace id
 		TimeoutMs:           5000,
 		NotLoadCacheAtStart: true,
-		LogDir:              "/tmp/nacos/log",
-		CacheDir:            "/tmp/nacos/cache",
+		LogDir:              "D:/tmp/nacos/log",
+		CacheDir:            "D:/tmp/nacos/cache",
 		RotateTime:          "1h",
 		MaxAge:              3,
 		LogLevel:            "debug",
@@ -56,8 +56,8 @@ func main() {
 		constant.WithNamespaceId("e525eafa-f7d7-4029-83d9-008937f9d468"),
 		constant.WithTimeoutMs(5000),
 		constant.WithNotLoadCacheAtStart(true),
-		constant.WithLogDir("/tmp/nacos/log"),
-		constant.WithCacheDir("/tmp/nacos/cache"),
+		constant.WithLogDir("D:/tmp/nacos/log"),
+		constant.WithCacheDir("D:/tmp/nacos/cache"),
 		constant.WithRotateTime("1h"),
 		constant.WithMaxAge(3),
 		constant.WithLogLevel("debug"),
@@ -103,15 +103,15 @@ func main() {
 		DataId: "test-data",
 		Group:  "test-group",
 		OnChange: func(namespace, group, dataId, data string) {
-			fmt.Println("config changed group:" + group + ", dataId:" + dataId + ", content:" + data)
+			fmt.Println("config changed 11111 group:" + group + ", dataId:" + dataId + ", content:" + data)
 		},
 	})
 
 	err = client.ListenConfig(vo.ConfigParam{
-		DataId: "test-data-2",
+		DataId: "test-data",
 		Group:  "test-group",
 		OnChange: func(namespace, group, dataId, data string) {
-			fmt.Println("config changed group:" + group + ", dataId:" + dataId + ", content:" + data)
+			fmt.Println("config changed 22222 group:" + group + ", dataId:" + dataId + ", content:" + data)
 		},
 	})
 

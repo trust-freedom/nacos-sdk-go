@@ -46,7 +46,7 @@ type NacosServer struct {
 	serverList          []constant.ServerConfig
 	httpAgent           http_agent.IHttpAgent
 	timeoutMs           uint64
-	endpoint            string
+	endpoint            string  // 刷新nacos server的接口地址
 	lastSrvRefTime      int64
 	vipSrvRefInterMills int64
 	contextPath         string
@@ -68,6 +68,8 @@ func NewNacosServer(serverList []constant.ServerConfig, clientCfg constant.Clien
 		vipSrvRefInterMills: 10000,
 		contextPath:         clientCfg.ContextPath,
 	}
+
+	// 初始化刷新serverList任务，如果需要
 	ns.initRefreshSrvIfNeed()
 	_, err := securityLogin.Login()
 
@@ -87,6 +89,7 @@ func (server *NacosServer) callConfigServer(api string, params map[string]string
 
 	signHeaders := getSignHeaders(params, newHeaders)
 
+	// 拼装url
 	url := curServer + contextPath + api
 
 	headers := map[string][]string{}
@@ -180,11 +183,13 @@ func (server *NacosServer) ReqConfigApi(api string, params map[string]string, he
 		return "", errors.New("server list is empty")
 	}
 
+	// 注入access token
 	injectSecurityInfo(server, params)
 
 	//only one server,retry request when error
 	var err error
 	var result string
+	// 如果server list长度为1，请求失败后重试，最多3次
 	if len(srvs) == 1 {
 		for i := 0; i < constant.REQUEST_DOMAIN_RETRY_TIME; i++ {
 			result, err = server.callConfigServer(api, params, headers, method, getAddress(srvs[0]), srvs[0].ContextPath, timeoutMS)
@@ -194,7 +199,7 @@ func (server *NacosServer) ReqConfigApi(api string, params map[string]string, he
 			logger.Errorf("api<%s>,method:<%s>, params:<%s>, call domain error:<%+v> , result:<%s>", api, method, util.ToJsonString(params), err, result)
 		}
 		return "", err
-	} else {
+	} else { // 从server list中选一个执行请求，错误后再选一个
 		index := rand.Intn(len(srvs))
 		for i := 1; i <= len(srvs); i++ {
 			curServer := srvs[index]
@@ -242,10 +247,14 @@ func (server *NacosServer) ReqApi(api string, params map[string]string, method s
 	}
 }
 
+// 初始化刷新任务
 func (server *NacosServer) initRefreshSrvIfNeed() {
+	// 刷新serverList端点不为空
 	if server.endpoint == "" {
 		return
 	}
+
+	// 刷新serverList，并开启定时刷新
 	server.refreshServerSrvIfNeed()
 	go func() {
 		for {
@@ -256,6 +265,7 @@ func (server *NacosServer) initRefreshSrvIfNeed() {
 
 }
 
+// 执行nacos server list刷新
 func (server *NacosServer) refreshServerSrvIfNeed() {
 	if util.CurrentMillis()-server.lastSrvRefTime < server.vipSrvRefInterMills && len(server.serverList) > 0 {
 		return
